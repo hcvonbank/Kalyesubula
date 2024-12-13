@@ -1,0 +1,307 @@
+---
+title: "Ntambi targeted Cleanup"
+author: "Lainy VonBank"
+date: "10/4/2024"
+output: html_document
+---
+
+---
+
+# Load packages
+```{r}
+if(!require(tidyverse)){install.packages("tidyverse")}
+if(!require(dplyr)){install.packages("dplyr")}
+if(!require(Cairo)){install.packages("Cairo")}
+library(readxl)
+getwd()
+```
+
+# Load data output from Agilent Quantitation software
+```{r, message = F}
+list.files()
+mydata <- read_csv("quant_liver_pmol.csv")
+Y <- mydata[-1,]
+Y1 <- t(Y)
+Y1 <- as.data.frame(Y1)
+colnames(Y1) <- Y1[1,]
+Y2 <- Y1[-1,]
+Y3 <- type.convert(Y2,as.is = T)
+```
+
+
+# Blank subtraction 
+Remove features where the abundance in an non-sample blank is higher than the average sample abundance
+```{r}
+
+Y3$avg <- rowMeans(Y3)
+# Specify the name of the process blank column below after the subtraction
+a <- as.name(colnames(select(Y3,matches("instd"))))
+print(a)
+# Copy this into the second part of the equation below. Make sure it is the PB
+
+Y4 <- mutate(Y3, sub_height = `avg` - `2024_1024_instd_017.d`)
+# Set NA values to 0
+Y4$sub_height <- replace_na(Y4$sub_height, 0)
+print(rownames(Y4[Y4$sub_height < 0,]))
+# If any values are less than 0 in Y1$sub_height, that lipid(s) is noise or a contaminant and excluded
+Y5 <- Y4[!Y4$sub_height < 0,]
+```
+
+# Remove extraneous columns and rename
+```{r}
+
+Y5 <- Y5 %>% select(-grep("instd", colnames(Y5)))
+Y5 <- Y5 %>% select(-grep("avg", colnames(Y5)))
+Y5 <- Y5 %>% select(-grep("sub_", colnames(Y5)))
+
+colnames(Y5) <- gsub(".*plasma_", "", colnames(Y5))
+colnames(Y5) <- gsub(".*liver_", "", colnames(Y5))
+colnames(Y5) <- gsub("_0.*" , "", colnames(Y5))
+colnames(Y5) <- gsub("__0.*" , "", colnames(Y5))
+print(colnames(Y5))
+```
+
+# Transpose data
+```{r}
+Y5$lipid <- rownames(Y5)
+Y5 <- Y5 %>% relocate(lipid)
+Y5 <- sapply(Y5, as.character)
+Y6 <- t(Y5)
+Y6 <- as.data.frame(Y6)
+colnames(Y6) <- Y6[1,]
+Y6 <- Y6[-1,]
+Y6 <- type.convert(Y6,as.is = T)
+Y6$Extraction <- rownames(Y6)
+Y6 <- Y6 %>% relocate(Extraction)
+
+```
+
+# Add sample information and produce initial output
+```{r}
+list.files()
+sample_info <- read_csv("Samples.csv")
+# Check for any other sample id discrepancies
+Y6$Extraction <- as.numeric(Y6$Extraction)
+Y7 <- merge(sample_info, Y6, by = "Extraction")
+
+```
+Verify data looks good and output initial merge file for further QC and analysis
+```{r}
+Y7[,5:ncol(Y7)] <- Y7[,5:ncol(Y7)]/Y7$Liver_mg
+
+
+Y8 <- Y7[,-c(2,4)]
+colnames(Y8) <- gsub(" Results","",colnames(Y8))
+
+write_csv(Y8, "liver_cleanup_pmol_mgtissue.csv")
+#write_csv(Y8, "plasma_cleanup_nM.csv")
+
+rm(list = ls())
+```
+
+
+# Triglyceride pool saturation
+```{r}
+library(ggplot2)
+library(ggpubr)
+list.files()
+
+Y9 <- read_csv("plasma_cleanup_nM.csv")
+
+TG<- Y9[,c(1:2,grep("TG", colnames(Y9)))]
+colnames(TG) <- gsub("NL.*","",colnames(TG))
+colnames(TG) <- gsub("SIM.*","",colnames(TG))
+colnames(TG) <- gsub(" \\[\\.*","",colnames(TG))
+
+mdat2 <- reshape2::melt(TG, id = c(1:2))
+mdat2$variable <- gsub(".*TG", "", mdat2$variable)
+mdat2$variable <- gsub("[()]", "", mdat2$variable)
+
+mdat3 <- str_split_fixed(mdat2$variable,":", 2)
+mdat4 <- cbind(mdat2,mdat3)
+
+names(mdat4)[names(mdat4) == '1'] <- 'length'
+names(mdat4)[names(mdat4) == '2'] <- 'DB'
+
+
+mdat5 <- aggregate(mdat4$value, by=list(Gen=mdat4$Genotype, DB=mdat4$DB), FUN=sum)
+colnames(mdat5)[colnames(mdat5) == 'x'] <- 'value'
+
+mdat5[,2] <- sapply(mdat5[,2], as.numeric)
+mdat5$class[mdat5$DB == 0] <- "0"
+mdat5$class[mdat5$DB == 1] <- "1"
+mdat5$class[mdat5$DB == 2] <- "2"
+mdat5$class[mdat5$DB == 3] <- "3"
+mdat5$class[mdat5$DB == 4] <- "4"
+mdat5$class[mdat5$DB == 5] <- "5"
+mdat5$class[mdat5$DB > 5] <- "6+"
+
+
+
+mdat5$Gen = factor(mdat5$Gen, levels = c("HET","GKO","TG5", "WT LL2","GKO LL2"), ordered = T)
+mdat5$class = factor(mdat5$class, ordered = T)
+
+p0 <- ggplot(mdat5, aes(x=Gen, y=value, fill=class)) + 
+    geom_bar(position="fill", stat="identity")
+
+p1 <- ggpar(p0, legend = "right", legend.title = "Number of double bonds", 
+               ylab = "% Abundance", title = "Triglyceride Composition")
+p2 <- p1 + theme_bw() 
+
+CairoPDF(file = paste0("Plasma_composition_TG.pdf"), height = 8, width = 12,)
+  print(p2)
+rm(list = ls())
+```
+
+#Phospholipids
+```{r}
+Y9 <- read_csv("plasma_cleanup_nM.csv")
+
+X <- Y9[,c(1:2,grep("P", colnames(Y9)))]
+X <- X[,-grep("L", colnames(X))]
+
+X1 <- reshape2::melt(X, id = c(1:2))
+
+X1$variable <- gsub(".*C", "", X1$variable)
+X1$variable <- gsub(".*E", "", X1$variable)
+X1$variable <- gsub(".*I", "", X1$variable)
+X1$variable <- gsub(".*S", "", X1$variable)
+X1$variable <- gsub(".*G", "", X1$variable)
+X1$variable <- gsub("[()]", "", X1$variable)
+X1$variable <- gsub("OH", "", X1$variable)
+X1$variable <- gsub("\\+", "", X1$variable)
+X1$variable <- gsub("\\[]", "", X1$variable)
+X1$variable <- gsub("a", "", X1$variable)
+X1$variable <- gsub("b", "", X1$variable)
+X1$variable <- gsub("c", "", X1$variable)
+X1$variable <- gsub(" n6", "", X1$variable)
+X1$variable <- gsub("O-", "", X1$variable)
+X1$variable <- gsub("P-", "", X1$variable)
+X1$variable <- gsub("\\\\","", X1$variable)
+X1$variable <- gsub("/","_", X1$variable)
+X1$variable <- gsub(" ","", X1$variable)
+
+check <- unique(X1$variable)
+
+X2 <- str_split_fixed(X1$variable, "_", 2)
+X3 <- cbind(X1,X2)
+X3_FA1 <- X3[,1:5]
+X3_FA2 <- X3[,c(1:4,6)]
+
+
+sn1 <- str_split_fixed(X3$`1`,":", 2)
+sn2 <- str_split_fixed(X3$`2`,":", 2)
+X6 <- cbind(X3,sn1,sn2)
+X6[,7:10] <- sapply(X6[,7:10], as.numeric)
+X6$sumacyl <- rowSums(X6[,c(7,9)], na.rm=T)
+X6$sumdb <- rowSums(X6[,c(8,10)], na.rm=T)
+X6$sumdb <- as.character(X6$sumdb)
+X7 <- X6 %>% unite("sumCOMP",11:12, sep = ":", remove = F)
+mdat5 <- aggregate(X7$value, by=list(Gen=X7$Genotype, DB=X7$sumdb), FUN=sum)
+colnames(mdat5)[colnames(mdat5) == 'x'] <- 'value'
+
+mdat5[,2] <- sapply(mdat5[,2], as.numeric)
+mdat5$class[mdat5$DB == 0] <- "0"
+mdat5$class[mdat5$DB == 1] <- "1"
+mdat5$class[mdat5$DB == 2] <- "2"
+mdat5$class[mdat5$DB == 3] <- "3"
+mdat5$class[mdat5$DB == 4] <- "4"
+mdat5$class[mdat5$DB == 5] <- "5"
+mdat5$class[mdat5$DB > 5] <- "6+"
+
+
+
+mdat5$Gen = factor(mdat5$Gen, levels = c("HET","GKO","TG5", "WT LL2","GKO LL2"), ordered = T)
+mdat5$class = factor(mdat5$class, ordered = T)
+
+p0 <- ggplot(mdat5, aes(x=Gen, y=value, fill=class)) + 
+    geom_bar(position="fill", stat="identity")
+
+p1 <- ggpar(p0, legend = "right", legend.title = "Number of double bonds", 
+               ylab = "% Abundance", title = "Phospholipid Composition")
+p2 <- p1 + theme_bw() 
+
+CairoPDF(file = paste0("Plasma_Composition_PL.pdf"), height = 8, width = 12,)
+  print(p2)
+rm(list = ls())
+```
+
+
+
+
+# DAGs acyl chains
+```{r}
+list.files()
+Y9 <- read_csv("liver_cleanup_pmol_mgtissue.csv")
+X <- Y9[,c(1:2,grep("DG", colnames(Y9)))]
+
+X1 <- reshape2::melt(X, id = c(1:2))
+
+X1$variable <- gsub(".*G", "", X1$variable)
+X1$variable <- gsub("[()]", "", X1$variable)
+
+check <- unique(X1$variable)
+print(check)
+
+X2 <- str_split_fixed(X1$variable, "_", 2)
+X3 <- cbind(X1,X2)
+X3_FA1 <- X3[,1:5]
+X3_FA2 <- X3[,c(1:4,6)]
+
+names(X3_FA1)[5] <- "FA"
+names(X3_FA2)[5] <- "FA"
+mdat4 <- bind_rows(X3_FA1, X3_FA2)
+mdat4$FA
+chain <- unique(mdat4$FA) 
+
+chain_keep <- chain
+#chain_keep <- c("16:0","16:1","18:0","18:1")
+X4 <- mdat4[mdat4$FA %in% chain_keep,]
+
+
+Xagg <- aggregate(X4$value, by=list(Name=X4$Extraction, Genotype=X4$Genotype, FA=X4$FA), FUN=sum)
+colnames(Xagg)[colnames(Xagg) == 'x'] <- 'value'
+
+X5 <-  subset(Xagg,Genotype %in% c("HET","GKO"))
+X5$Genotype <- factor(X5$Genotype,levels = c("HET","GKO"), ordered = T)
+a = "FA"
+b = "value"
+c = "Genotype"
+
+library(ggplot2)
+library(ggpubr)
+library(rstatix)
+library(ggbreak)
+p0 <- ggbarplot(X5, x = a, y = b,
+            add = c("mean_se"), color = c,fill=c, 
+            add.params = list(width = 0.35, binwidth = 0.07),
+            alpha = 0.5, position = position_dodge(0.8), size = .5)  +
+   scale_y_cut(breaks=c(2500), which=c(1, 2), scales=c(1, 2)) +
+  #coord_cartesian(ylim=c(0,1.1*max(X5$value, na.rm = T)))
+scale_y_continuous(limits = c(0.00, 1.1*max(X5$value, na.rm = T)), expand = c(0,0) ) 
+
+p1 <- ggpar(p0, palette = c("red","blue"),legend = "right", title = "Diglyceride Acyl Chains",legend.title = c, xlab = F, ylab = "Acyl chain sum") +
+  theme(text = element_text(size=12),
+        axis.text.x = element_text(angle=45, hjust=1, size = 12)) 
+
+stat.test <- X5 %>% 
+                  group_by(FA) %>% 
+                  pairwise_t_test(value ~ Genotype) %>% 
+                  adjust_pvalue(method = "none") %>%
+                  add_significance("p") 
+                 
+  stat.test$p.adj.signif <- stat.test$p.signif 
+  
+   stat.test <- stat.test %>%  add_xy_position(fun="mean_se",x=a)
+  
+  p3 <- p1 + stat_pvalue_manual(
+      stat.test, label = "p.adj.signif", hide.ns = T,tip.length = 0.008)
+ print(p3)
+
+CairoPDF(file = paste0("Liver_DG_Chains.pdf"), height = 8, width = 12,)
+  print(p3)
+
+
+write_csv(stat.test,"Liver_DG_Chains_stats.csv")
+rm(list = ls())
+```
